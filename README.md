@@ -3,8 +3,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Bash](https://img.shields.io/badge/Bash-4.0+-green.svg)](https://www.gnu.org/software/bash/)
 [![Azure CLI](https://img.shields.io/badge/Azure_CLI-Required-blue.svg)](https://docs.microsoft.com/en-us/cli/azure/)
-![GitHub last commit](https://img.shields.io/github/last-commit/darylscorner/azure-suse-payg-to-byos)
-![GitHub issues](https://img.shields.io/github/issues/darylscorner/azure-suse-payg-to-byos)
+![GitHub last commit](https://img.shields.io/github/last-commit/DarylsCorner/azure-suse-payg-to-byos)
+![GitHub issues](https://img.shields.io/github/issues/DarylsCorner/azure-suse-payg-to-byos)
 [![Azure](https://img.shields.io/badge/Azure-Compatible-0078D4?logo=microsoft-azure)](https://azure.microsoft.com)
 [![SUSE](https://img.shields.io/badge/SUSE-Linux-0C322C?logo=suse)](https://www.suse.com)
 
