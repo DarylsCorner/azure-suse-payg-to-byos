@@ -438,7 +438,7 @@ zypper repos --uri | grep -E '(Enabled|URI)'
 "
 fi
 
-vm_log "Running combined cleanup/register/validate script (this takes 3-5 minutes)..."
+vm_log "Running combined cleanup/register/validate script..."
 echo -n "  [VM Config] Executing"
 
 {
