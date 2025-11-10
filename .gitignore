@@ -1,0 +1,33 @@
+# Log files
+logs/
+*.log
+
+# Backup files
+*.backup
+*.bak
+
+# Temporary files
+/tmp/
+*.tmp
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# SSH keys
+*.pem
+*.key
+id_rsa*
+
+# Azure credentials
+.azure/
+
+# Test files (optional - uncomment if you don't want to track test scripts)
+# test-*.sh
