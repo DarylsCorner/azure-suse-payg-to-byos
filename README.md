@@ -1,5 +1,9 @@
 # SUSE PAYG to BYOS Conversion Script
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Bash](https://img.shields.io/badge/Bash-4.0+-green.svg)](https://www.gnu.org/software/bash/)
+[![Azure CLI](https://img.shields.io/badge/Azure_CLI-Required-blue.svg)](https://docs.microsoft.com/en-us/cli/azure/)
+
 This script automates the conversion of Azure SUSE VMs from Pay-As-You-Go (PAYG) to Bring-Your-Own-Subscription (BYOS) with SUSE Manager registration.
 
 ## Prerequisites
