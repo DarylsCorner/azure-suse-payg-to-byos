@@ -193,34 +193,56 @@ log_info "SUSE Manager URL: $SUSE_MANAGER_URL"
 log_info "Parallel Jobs: $PARALLEL_JOBS"
 log_info "Test Mode: $TEST_MODE"
 
-# Retrieve activation key from secure sources (unless in test mode)
+# Retrieve activation key from secure sources
 ACTIVATION_KEY=""
-if [[ "$TEST_MODE" == false ]]; then
-    # Priority 1: Key Vault (most secure)
-    if [[ -n "$KEYVAULT_NAME" && -n "$SECRET_NAME" ]]; then
-        log_info "Retrieving activation key from Key Vault: $KEYVAULT_NAME"
-        ACTIVATION_KEY=$(az keyvault secret show \
-            --vault-name "$KEYVAULT_NAME" \
-            --name "$SECRET_NAME" \
-            --query value -o tsv 2>&1)
-        
-        if [[ $? -ne 0 ]]; then
-            log_error "Failed to retrieve activation key from Key Vault"
-            log_error "$ACTIVATION_KEY"
-            exit 1
-        fi
-        
-        log_info "✓ Activation key retrieved from Key Vault"
-    # Priority 2: Environment variable
-    elif [[ -n "$SUSE_ACTIVATION_KEY" ]]; then
-        ACTIVATION_KEY="$SUSE_ACTIVATION_KEY"
-        log_info "✓ Using activation key from SUSE_ACTIVATION_KEY environment variable"
-    else
+SKIP_ACTIVATION_KEY=false
+
+# In test mode, activation key is optional
+if [[ "$TEST_MODE" == true ]]; then
+    log_info "Test mode: Activation key is optional"
+    SKIP_ACTIVATION_KEY=true
+fi
+
+# Try to retrieve activation key from Key Vault or environment variable
+# Priority 1: Key Vault (most secure)
+if [[ -n "$KEYVAULT_NAME" && -n "$SECRET_NAME" ]]; then
+    log_info "Retrieving activation key from Key Vault: $KEYVAULT_NAME"
+    ACTIVATION_KEY=$(az keyvault secret show \
+        --vault-name "$KEYVAULT_NAME" \
+        --name "$SECRET_NAME" \
+        --query value -o tsv 2>&1)
+    
+    if [[ $? -ne 0 ]]; then
+        log_error "Failed to retrieve activation key from Key Vault"
+        log_error "$ACTIVATION_KEY"
+        exit 1
+    fi
+    
+    log_info "✓ Activation key retrieved from Key Vault"
+    
+    # In test mode, show the retrieved key for verification
+    if [[ "$TEST_MODE" == true ]]; then
+        log_info "TEST MODE - Retrieved activation key: ${ACTIVATION_KEY:0:20}... (${#ACTIVATION_KEY} chars)"
+    fi
+# Priority 2: Environment variable
+elif [[ -n "$SUSE_ACTIVATION_KEY" ]]; then
+    ACTIVATION_KEY="$SUSE_ACTIVATION_KEY"
+    log_info "✓ Using activation key from SUSE_ACTIVATION_KEY environment variable"
+    
+    # In test mode, show the retrieved key for verification
+    if [[ "$TEST_MODE" == true ]]; then
+        log_info "TEST MODE - Retrieved activation key: ${ACTIVATION_KEY:0:20}... (${#ACTIVATION_KEY} chars)"
+    fi
+# No activation key provided
+else
+    if [[ "$SKIP_ACTIVATION_KEY" == false ]]; then
         log_error "No activation key provided. Please use one of:"
         log_error "  1. Key Vault: --keyvault <vault-name> --secret-name <secret-name>"
         log_error "  2. Environment variable: export SUSE_ACTIVATION_KEY='your-key'"
         log_error "  3. Test mode: -t (skips SUSE Manager registration)"
         exit 1
+    else
+        log_info "Test mode: No activation key provided (will use simulated registration)"
     fi
 fi
 

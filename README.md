@@ -146,6 +146,9 @@ ls -la /etc/zypp/repos.d.backup/
 - **No image change required**: The script works with your existing `sles-sap-15-sp6` image
 - **Idempotent**: Safely skips VMs already configured with BYOS license
 - **Test mode**: Use `-t` flag to test script logic without SUSE Manager (validates everything except registration)
+  - Can be combined with Key Vault parameters to verify activation key retrieval
+  - Logs the first 20 characters of retrieved key for verification
+  - Creates test repository instead of real SUSE Manager registration
 - **Single VM or resource group mode**: Use `-n` for testing one VM, omit it to process all SLES VMs
 - **Auto-discovery**: When processing a resource group, automatically finds all SLES VMs
 - **Parallel execution**: Use `-p` flag to run multiple conversions simultaneously (recommended: 5-10)
@@ -160,6 +163,15 @@ ls -la /etc/zypp/repos.d.backup/
 ./convert-suse-payg-to-byos.sh \
   -g test-rg \
   -s test.example.com \
+  -t
+
+# Test mode with Key Vault - validates activation key retrieval (recommended for pre-deployment testing)
+./convert-suse-payg-to-byos.sh \
+  -g test-rg \
+  -n test-vm-01 \
+  -s test.example.com \
+  --keyvault WorkloadKeyVault \
+  --secret-name suse-activation-key \
   -t
 
 # Production: Test on single VM with Key Vault (recommended)
@@ -217,6 +229,22 @@ After running the script, verify:
 
 ## Workflow
 
+### Phase 0: Pre-Deployment Testing (Recommended)
+```bash
+# Test Key Vault access without touching production SUSE Manager
+./convert-suse-payg-to-byos.sh \
+  -g test-rg \
+  -n test-vm-01 \
+  -s test.example.com \
+  --keyvault WorkloadKeyVault \
+  --secret-name suse-activation-key \
+  -t -y
+```
+- Validates Key Vault access and activation key retrieval
+- Tests VM cleanup and license change without SUSE Manager
+- Logs show: `TEST MODE - Retrieved activation key: <first-20-chars>... (<length> chars)`
+- Safe to run in any environment
+
 ### Phase 1: Test on Single VM
 ```bash
 ./convert-suse-payg-to-byos.sh \
@@ -226,7 +254,7 @@ After running the script, verify:
   --keyvault WorkloadKeyVault \
   --secret-name suse-activation-key
 ```
-- Validates the process on one VM
+- Validates the process on one VM with real SUSE Manager
 - Allows you to verify repository configuration
 - Test application functionality before scaling
 
@@ -272,9 +300,17 @@ After running the script, verify:
 - Monitor SUSE Manager load if running parallel jobs
 
 ### Activation key errors
-- **Key Vault access denied**: Ensure you have `Key Vault Secrets User` role
+- **Key Vault access denied**: 
+  - For users: Ensure you have `Key Vault Secrets User` role or access policy
+  - For UAMI: Grant access policy with `az keyvault set-policy --object-id <uami-object-id>`
+  - For Service Principal: Grant access policy with object ID
+  - Verify authentication: `az account show`
 - **Environment variable not set**: Check `echo $SUSE_ACTIVATION_KEY`
 - **Invalid URL format**: Script validates URL - check error message for details
+- **UAMI not authenticated**: 
+  - Login with: `az login --identity --client-id <uami-client-id>` (note: use --client-id, not --username)
+  - Verify UAMI is assigned to the VM running the script
+  - Ensure UAMI has subscription Reader role assigned
 
 ### License type doesn't update
 - Verify you have permissions: `az vm update` requires VM Contributor role
@@ -309,12 +345,75 @@ az keyvault secret set \
   --name "suse-activation-key" \
   --value "your-key-here"
 
-# Grant access to users/service principals
+# === Option 1: Access Policies (Traditional) ===
+
+# Grant access to users
 az keyvault set-policy \
   --name "WorkloadKeyVault" \
   --upn "user@company.com" \
   --secret-permissions get list
+
+# Grant access to User-Assigned Managed Identity (UAMI)
+az keyvault set-policy \
+  --name "WorkloadKeyVault" \
+  --object-id "<uami-object-id>" \
+  --secret-permissions get list
+
+# Grant access to Service Principal
+az keyvault set-policy \
+  --name "WorkloadKeyVault" \
+  --object-id "<sp-object-id>" \
+  --secret-permissions get list
 ```
+
+```bash
+# === Option 2: Azure RBAC (Recommended for new Key Vaults) ===
+
+# Create Key Vault with RBAC enabled
+az keyvault create \
+  --name "WorkloadKeyVault" \
+  --resource-group "<resource-group>" \
+  --enable-rbac-authorization true
+
+# Grant "Key Vault Secrets User" role to users
+az role assignment create \
+  --assignee "user@company.com" \
+  --role "Key Vault Secrets User" \
+  --scope "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/WorkloadKeyVault"
+
+# Grant "Key Vault Secrets User" role to UAMI
+az role assignment create \
+  --assignee "<uami-object-id>" \
+  --role "Key Vault Secrets User" \
+  --scope "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/WorkloadKeyVault"
+
+# Grant "Key Vault Secrets User" role to Service Principal
+az role assignment create \
+  --assignee "<sp-object-id>" \
+  --role "Key Vault Secrets User" \
+  --scope "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/WorkloadKeyVault"
+```
+
+**Note:** The script works with both Access Policies and RBAC - use whichever your organization prefers.
+
+
+**Using with Managed Identity:**
+If running the script from a VM with User-Assigned Managed Identity (UAMI):
+1. Ensure the VM has the UAMI assigned
+2. Grant the UAMI **two required permissions**:
+   - Key Vault access policy for secrets (see above)
+   - Subscription Reader role: `az role assignment create --assignee <uami-principal-id> --role Reader --scope /subscriptions/<subscription-id>`
+3. Authenticate Azure CLI with the managed identity:
+   ```bash
+   # Login with UAMI (use --client-id, not --username)
+   az login --identity --client-id <uami-client-id>
+   
+   # Verify authentication (should show type: servicePrincipal)
+   az account show
+   ```
+4. Run the script normally - it will use the UAMI's permissions
+
+**✅ Tested:** UAMI Key Vault access has been validated in test environment
 
 **⚠️ Acceptable: Environment Variable**
 - Use for development/testing only
@@ -326,6 +425,21 @@ az keyvault set-policy \
 - Previous `-k` parameter has been removed
 - Command-line parameters visible in process lists and bash history
 - Use Key Vault or environment variables instead
+
+### Activation Key Retrieval
+
+**How it works:**
+- Activation key is retrieved **once** at script startup from Key Vault or environment variable
+- The same key is reused for all VMs in the batch (no per-VM retrieval)
+- VMs never access Key Vault directly - they receive the key via the bootstrap command
+- In test mode (`-t`), logs show first 20 characters of retrieved key for verification
+
+**Testing Key Vault access:**
+```bash
+# Verify Key Vault retrieval works before production use
+./convert-suse-payg-to-byos.sh -g <rg> -n <vm> -s test.example.com \
+  --keyvault WorkloadKeyVault --secret-name suse-activation-key -t
+```
 
 ### URL Validation
 
