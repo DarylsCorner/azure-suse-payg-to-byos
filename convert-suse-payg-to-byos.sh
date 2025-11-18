@@ -21,7 +21,10 @@ NC='\033[0m' # No Color
 # Function to log to both console and file
 log_to_file() {
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] $1" >> "$LOG_FILE"
+    # Only write to log file if it has been initialized
+    if [[ -n "$LOG_FILE" ]]; then
+        echo "[$timestamp] $1" >> "$LOG_FILE"
+    fi
 }
 
 # Function to print colored messages
