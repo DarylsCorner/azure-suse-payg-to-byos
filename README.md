@@ -141,6 +141,16 @@ ls -la /etc/zypp/repos.d.backup/
 # custom-app.repo  <- Your custom repo backed up here
 ```
 
+**Cleaning up backups:**
+Once you've verified the conversion was successful and no longer need the backed-up repositories, use the cleanup script:
+```bash
+# Clean up single VM
+./cleanup-backup-repos.sh -g prod-sap-rg -n sap-vm-01
+
+# Clean up all SLES VMs in resource group
+./cleanup-backup-repos.sh -g prod-sap-rg -y
+```
+
 ## Important Notes
 
 - **No image change required**: The script works with your existing `sles-sap-15-sp6` image
@@ -154,7 +164,7 @@ ls -la /etc/zypp/repos.d.backup/
 - **Parallel execution**: Use `-p` flag to run multiple conversions simultaneously (recommended: 5-10)
 - **Minimal downtime**: Most operations don't require VM restart
 - **Reversible**: Keep backups of repository configurations (auto-saved to `/etc/zypp/repos.d.backup/`)
-- **Detailed logging**: Main log + individual VM logs for parallel execution
+- **Detailed logging**: Main log file + individual per-VM log files for easy troubleshooting
 
 ## Example Usage
 
@@ -225,6 +235,53 @@ After running the script, verify:
    az vm run-command invoke -g <rg> -n <vm> \
      --command-id RunShellScript \
      --scripts "rhn_check"
+   ```
+
+4. **Clean up backup repositories** (optional, after successful validation):
+   ```bash
+   # Remove backed-up PAYG repos from single VM
+   ./cleanup-backup-repos.sh -g <rg> -n <vm>
+   
+   # Remove backed-up PAYG repos from all VMs in resource group
+      # Remove backed-up PAYG repos from all VMs in resource group
+   ./cleanup-backup-repos.sh -g <rg> -y
+   ```
+
+## Log File Structure
+
+The script creates a dedicated directory for each run to keep all related log files organized:
+
+```
+logs/
+└── RG-EastUS_20251117-165702/
+    ├── main.log                        # Main summary log with all VM operations
+    ├── sles-payg-vmss_42a53c95.log    # Individual VM log
+    ├── sles-payg-vmss_46d5850d.log    # Individual VM log
+    └── sles-payg-vmss_7b20ceeb.log    # Individual VM log
+```
+
+**Benefits:**
+- **Easy to find**: All logs for a specific run are in one directory
+- **Clean separation**: Each run is isolated, preventing hundreds of log files mixed together
+- **Simple review**: Check `main.log` for overview, individual VM logs for detailed troubleshooting
+- **Directory naming**: `<ResourceGroup>_<Timestamp>` format makes it easy to identify runs
+
+**Viewing logs:**
+```bash
+# View main summary log
+cat logs/RG-EastUS_20251117-165702/main.log
+
+# View specific VM log (no VM prefix clutter)
+cat logs/RG-EastUS_20251117-165702/sles-payg-vmss_42a53c95.log
+
+# Filter main log for specific VM
+grep "\[VM: sles-payg-vmss_42a53c95\]" logs/RG-EastUS_20251117-165702/main.log
+
+# List all log directories
+ls -lt logs/
+```
+
+## Troubleshooting
    ```
 
 ## Workflow

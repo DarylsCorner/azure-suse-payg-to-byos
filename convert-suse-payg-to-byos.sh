@@ -177,8 +177,11 @@ if ! [[ "$PARALLEL_JOBS" =~ ^[0-9]+$ ]] || [ "$PARALLEL_JOBS" -lt 1 ]; then
     exit 1
 fi
 
-# Create log file with resource group and timestamp
-LOG_FILE="${LOG_DIR}/${RESOURCE_GROUP}_$(date +%Y%m%d-%H%M%S).log"
+# Create run-specific log directory and main log file
+RUN_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+RUN_LOG_DIR="${LOG_DIR}/${RESOURCE_GROUP}_${RUN_TIMESTAMP}"
+mkdir -p "$RUN_LOG_DIR"
+LOG_FILE="${RUN_LOG_DIR}/main.log"
 
 log_info "=========================================="
 log_info "SUSE PAYG to BYOS Conversion"
@@ -190,7 +193,7 @@ fi
 log_info "Starting SUSE PAYG to BYOS conversion process"
 log_info "Resource Group: $RESOURCE_GROUP"
 log_info "SUSE Manager URL: $SUSE_MANAGER_URL"
-log_info "Parallel Jobs: $PARALLEL_JOBS"
+log_info "Execution Mode: $([ $PARALLEL_JOBS -eq 1 ] && echo 'Sequential' || echo "Parallel ($PARALLEL_JOBS jobs)")"
 log_info "Test Mode: $TEST_MODE"
 
 # Retrieve activation key from secure sources
@@ -322,18 +325,19 @@ convert_vm() {
     local VM_NUMBER="$2"
     local TOTAL_VMS="$3"
     
-    # Create per-VM log file for parallel execution
-    local VM_LOG_FILE="${LOG_DIR}/${RESOURCE_GROUP}_${CURRENT_VM}_$(date +%Y%m%d-%H%M%S).log"
+    # Create VM-specific log file in run-specific directory
+    local VM_LOG_FILE="${RUN_LOG_DIR}/${CURRENT_VM}.log"
     
-    # Function to log to VM-specific file
+    # Function to log to both main log and VM-specific log
     vm_log() {
         local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-        echo "[$timestamp] $1" | tee -a "$VM_LOG_FILE" >> "$LOG_FILE"
+        echo "[$timestamp] $1" >> "$VM_LOG_FILE"
+        echo "[$timestamp] [VM: $CURRENT_VM] $1" >> "$LOG_FILE"
     }
     
     vm_log ""
     vm_log "=========================================="
-    vm_log "Processing VM $VM_NUMBER of $TOTAL_VMS: $CURRENT_VM"
+    vm_log "Processing VM $VM_NUMBER of $TOTAL_VMS"
     vm_log "=========================================="
     vm_log "VM-specific log: $VM_LOG_FILE"
     
@@ -342,7 +346,7 @@ convert_vm() {
     VM_INFO=$(az vm show -g "$RESOURCE_GROUP" -n "$CURRENT_VM" -o json 2>&1)
     if [ $? -ne 0 ]; then
         vm_log "ERROR: Failed to retrieve VM information"
-        echo "$VM_INFO" >> "$VM_LOG_FILE"
+        vm_log "$VM_INFO"
         return 1
     fi
     
@@ -483,12 +487,23 @@ echo " Done"
 
 COMBINED_OUTPUT=$(cat /tmp/combined_output_$CURRENT_VM)
 rm -f /tmp/combined_output_$CURRENT_VM
-echo "$COMBINED_OUTPUT" >> "$VM_LOG_FILE"
 
 # Extract and display validation results
 vm_log "=== VM Configuration Results ==="
-echo "$COMBINED_OUTPUT" | grep -A 50 "=== STEP" >> "$VM_LOG_FILE" || true
-vm_log "Configuration completed (see log for details)"
+# Parse the stdout message from JSON and log it properly
+STDOUT_MESSAGE=$(echo "$COMBINED_OUTPUT" | jq -r '.value[0].message' 2>/dev/null | sed -n '/\[stdout\]/,/\[stderr\]/p' | sed '1d;$d')
+if [[ -n "$STDOUT_MESSAGE" ]]; then
+    echo "$STDOUT_MESSAGE" | while IFS= read -r line; do
+        vm_log "$line"
+    done
+else
+    # Fallback if jq parsing fails
+    vm_log "Failed to parse VM output, showing raw output:"
+    echo "$COMBINED_OUTPUT" | while IFS= read -r line; do
+        vm_log "$line"
+    done
+fi
+vm_log "Configuration completed"
 
 # Step 2: Update Azure license type
 vm_log "Step 2: Updating Azure license type to SLES_BYOS..."
@@ -512,7 +527,6 @@ echo " Done"
 
 LICENSE_UPDATE_OUTPUT=$(cat /tmp/license_output_$CURRENT_VM)
 rm -f /tmp/license_output_$CURRENT_VM
-echo "$LICENSE_UPDATE_OUTPUT" >> "$VM_LOG_FILE"
 
 vm_log "License type updated successfully"
 
@@ -562,8 +576,6 @@ trap "rm -rf $TEMP_DIR" EXIT
 
 if [[ $PARALLEL_JOBS -eq 1 ]]; then
     # Sequential execution
-    log_info "Running in sequential mode..."
-    
     for i in "${!VMS[@]}"; do
         VM_NUMBER=$((i + 1))
         
@@ -588,8 +600,6 @@ if [[ $PARALLEL_JOBS -eq 1 ]]; then
     done
 else
     # Parallel execution
-    log_info "Running in parallel mode with $PARALLEL_JOBS concurrent jobs..."
-    
     for i in "${!VMS[@]}"; do
         VM_NUMBER=$((i + 1))
         
@@ -706,11 +716,8 @@ log_info "Failed: $FAILED"
 log_info "SUSE Manager: $SUSE_MANAGER_URL"
 log_info "=========================================="
 echo ""
-log_info "Main log file: $LOG_FILE"
-if [[ $PARALLEL_JOBS -gt 1 ]]; then
-    log_info "Individual VM logs saved in: $LOG_DIR/"
-fi
+log_info "Log file: $LOG_FILE"
 log_warn "Next steps:"
-echo "  1. Review the logs for any errors"
+echo "  1. Review the log file for any errors"
 echo "  2. Test application functionality on converted VMs"
 log_to_file "Batch conversion completed - $SUCCESSFUL successful, $SKIPPED skipped, $FAILED failed"
