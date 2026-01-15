@@ -35,6 +35,7 @@ Required parameters:
 
 Optional parameters:
     -n                VM name (if specified, only clean this VM; otherwise clean all SLES VMs in resource group)
+    -p                Number of parallel jobs (default: 1). Recommended: 5
     -y                Auto-confirm (skip confirmation prompt)
     -h                Display this help message
 
@@ -63,11 +64,13 @@ EOF
 
 # Parse command line arguments
 AUTO_CONFIRM=false
+PARALLEL_JOBS=1
 
-while getopts "g:n:yh" opt; do
+while getopts "g:n:p:yh" opt; do
     case $opt in
         g) RESOURCE_GROUP="$OPTARG" ;;
         n) VM_NAME="$OPTARG" ;;
+        p) PARALLEL_JOBS="$OPTARG" ;;
         y) AUTO_CONFIRM=true ;;
         h) usage ;;
         *) usage ;;
@@ -78,6 +81,12 @@ done
 if [[ -z "$RESOURCE_GROUP" ]]; then
     log_error "Missing required parameter: -g <resource-group>"
     usage
+fi
+
+# Validate parallel jobs parameter
+if ! [[ "$PARALLEL_JOBS" =~ ^[0-9]+$ ]] || [ "$PARALLEL_JOBS" -lt 1 ]; then
+    log_error "Parallel jobs must be a positive integer"
+    exit 1
 fi
 
 log_info "=========================================="
@@ -137,37 +146,80 @@ else
 fi
 
 echo ""
-log_info "Checking for backup directories on VMs..."
+log_info "Checking for backup directories on VMs$([ $PARALLEL_JOBS -gt 1 ] && echo " (parallel: $PARALLEL_JOBS)")..."
+
+# Create temporary directory for results
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_DIR" EXIT
+
+# Check each VM for backup directory (parallel)
+if [[ $PARALLEL_JOBS -gt 1 ]]; then
+    for vm in "${VMS[@]}"; do
+        while [ $(jobs -r | wc -l) -ge $PARALLEL_JOBS ]; do
+            sleep 1
+        done
+        (
+            BACKUP_CHECK=$(az vm run-command invoke \
+                -g "$RESOURCE_GROUP" \
+                -n "$vm" \
+                --command-id RunShellScript \
+                --scripts "if [ -d /etc/zypp/repos.d.backup ]; then ls -lh /etc/zypp/repos.d.backup/ 2>/dev/null | tail -n +2 | wc -l; else echo '0'; fi" \
+                --query 'value[0].message' -o tsv 2>/dev/null | grep -o '[0-9]*' | head -1)
+            echo "$BACKUP_CHECK" > "$TEMP_DIR/check_$vm"
+        ) &
+    done
+    
+    echo -n "  Checking: "
+    while [ $(jobs -r | wc -l) -gt 0 ]; do
+        echo -n "."
+        sleep 2
+    done
+    echo " Done"
+    echo ""
+    
+    # Collect results
+    VMS_WITH_BACKUPS=()
+    for vm in "${VMS[@]}"; do
+        BACKUP_CHECK=$(cat "$TEMP_DIR/check_$vm" 2>/dev/null)
+        if [[ -n "$BACKUP_CHECK" && "$BACKUP_CHECK" -gt 0 ]]; then
+            log_info "  ✓ $vm: $BACKUP_CHECK file(s) in backup"
+            VMS_WITH_BACKUPS+=("$vm")
+        else
+            log_warn "  ⊙ $vm: No backup found"
+        fi
+    done
+else
+    # Sequential check
+    VMS_WITH_BACKUPS=()
+    for vm in "${VMS[@]}"; do
+        log_info "Checking VM: $vm"
+        
+        BACKUP_CHECK=$(az vm run-command invoke \
+            -g "$RESOURCE_GROUP" \
+            -n "$vm" \
+            --command-id RunShellScript \
+            --scripts "if [ -d /etc/zypp/repos.d.backup ]; then ls -lh /etc/zypp/repos.d.backup/ 2>/dev/null | tail -n +2 | wc -l; else echo '0'; fi" \
+            --query 'value[0].message' -o tsv 2>/dev/null | grep -o '[0-9]*' | head -1)
+        
+        if [[ -n "$BACKUP_CHECK" && "$BACKUP_CHECK" -gt 0 ]]; then
+            log_info "  ✓ Backup directory exists: $BACKUP_CHECK file(s) in /etc/zypp/repos.d.backup/"
+            VMS_WITH_BACKUPS+=("$vm")
+        else
+            log_warn "  ⊙ No backup directory found (already cleaned or never converted)"
+        fi
+        echo ""
+    done
+fi
+
 echo ""
 
-# Check each VM for backup directory
-HAS_BACKUPS=false
-for vm in "${VMS[@]}"; do
-    log_info "Checking VM: $vm"
-    
-    BACKUP_CHECK=$(az vm run-command invoke \
-        -g "$RESOURCE_GROUP" \
-        -n "$vm" \
-        --command-id RunShellScript \
-        --scripts "if [ -d /etc/zypp/repos.d.backup ]; then ls -lh /etc/zypp/repos.d.backup/ 2>/dev/null | tail -n +2 | wc -l; else echo '0'; fi" \
-        --query 'value[0].message' -o tsv 2>/dev/null | grep -o '[0-9]*' | head -1)
-    
-    if [[ -n "$BACKUP_CHECK" && "$BACKUP_CHECK" -gt 0 ]]; then
-        log_info "  ✓ Backup directory exists: $BACKUP_CHECK file(s) in /etc/zypp/repos.d.backup/"
-        HAS_BACKUPS=true
-    else
-        log_warn "  ⊙ No backup directory found (already cleaned or never converted)"
-    fi
-    echo ""
-done
-
-if [[ "$HAS_BACKUPS" == false ]]; then
+if [[ ${#VMS_WITH_BACKUPS[@]} -eq 0 ]]; then
     log_info "No backup directories found on any VMs. Nothing to clean up."
     exit 0
 fi
 
 # Confirm before proceeding
-log_warn "This script will PERMANENTLY DELETE backed-up repository files from ${#VMS[@]} VM(s):"
+log_warn "This script will PERMANENTLY DELETE backed-up repository files from ${#VMS_WITH_BACKUPS[@]} VM(s):"
 echo "  - Location: /etc/zypp/repos.d.backup/"
 echo "  - These are the original PAYG repository files backed up during conversion"
 echo "  - This action cannot be undone"
@@ -185,19 +237,73 @@ else
     fi
 fi
 
-# Perform cleanup
+# Perform cleanup (only on VMs with backups)
 SUCCESSFUL=0
 FAILED=0
-SKIPPED=0
 
-for vm in "${VMS[@]}"; do
-    log_info "Processing VM: $vm"
+if [[ $PARALLEL_JOBS -gt 1 ]]; then
+    log_info "Cleaning up ${#VMS_WITH_BACKUPS[@]} VMs in parallel (max $PARALLEL_JOBS concurrent)..."
     
-    CLEANUP_RESULT=$(az vm run-command invoke \
-        -g "$RESOURCE_GROUP" \
-        -n "$vm" \
-        --command-id RunShellScript \
-        --scripts "
+    for vm in "${VMS_WITH_BACKUPS[@]}"; do
+        while [ $(jobs -r | wc -l) -ge $PARALLEL_JOBS ]; do
+            sleep 1
+        done
+        (
+            CLEANUP_RESULT=$(az vm run-command invoke \
+                -g "$RESOURCE_GROUP" \
+                -n "$vm" \
+                --command-id RunShellScript \
+                --scripts "
+if [ -d /etc/zypp/repos.d.backup ]; then
+    FILE_COUNT=\$(ls -1 /etc/zypp/repos.d.backup/ 2>/dev/null | wc -l)
+    rm -rf /etc/zypp/repos.d.backup/
+    if [ \$? -eq 0 ]; then
+        echo \"SUCCESS: Removed \$FILE_COUNT file(s)\"
+    else
+        echo \"ERROR: Failed to remove backup directory\"
+    fi
+else
+    echo \"SKIP: No backup directory found\"
+fi
+" --query 'value[0].message' -o tsv 2>&1)
+            
+            if echo "$CLEANUP_RESULT" | grep -q "SUCCESS:"; then
+                echo "SUCCESS|$vm" > "$TEMP_DIR/cleanup_$vm"
+            else
+                echo "FAILED|$vm" > "$TEMP_DIR/cleanup_$vm"
+            fi
+        ) &
+    done
+    
+    echo -n "  Cleaning: "
+    while [ $(jobs -r | wc -l) -gt 0 ]; do
+        echo -n "."
+        sleep 2
+    done
+    echo " Done"
+    echo ""
+    
+    # Collect results
+    for vm in "${VMS_WITH_BACKUPS[@]}"; do
+        RESULT=$(cat "$TEMP_DIR/cleanup_$vm" 2>/dev/null)
+        if [[ "$RESULT" == SUCCESS* ]]; then
+            ((SUCCESSFUL++))
+            log_info "  ✓ $vm: Cleanup successful"
+        else
+            ((FAILED++))
+            log_error "  ✗ $vm: Cleanup failed"
+        fi
+    done
+else
+    # Sequential cleanup
+    for vm in "${VMS_WITH_BACKUPS[@]}"; do
+        log_info "Processing VM: $vm"
+        
+        CLEANUP_RESULT=$(az vm run-command invoke \
+            -g "$RESOURCE_GROUP" \
+            -n "$vm" \
+            --command-id RunShellScript \
+            --scripts "
 if [ -d /etc/zypp/repos.d.backup ]; then
     FILE_COUNT=\$(ls -1 /etc/zypp/repos.d.backup/ 2>/dev/null | wc -l)
     rm -rf /etc/zypp/repos.d.backup/
@@ -211,21 +317,19 @@ else
     echo \"SKIP: No backup directory found\"
 fi
 " --query 'value[0].message' -o tsv 2>&1)
-    
-    if echo "$CLEANUP_RESULT" | grep -q "SUCCESS:"; then
-        ((SUCCESSFUL++))
-        log_info "  ✓ Cleanup successful"
-        echo "$CLEANUP_RESULT" | grep "SUCCESS:" | sed 's/\[stdout\]//g' | sed 's/^/    /'
-    elif echo "$CLEANUP_RESULT" | grep -q "SKIP:"; then
-        ((SKIPPED++))
-        log_warn "  ⊙ Skipped (no backup found)"
-    else
-        ((FAILED++))
-        log_error "  ✗ Cleanup failed"
-        echo "$CLEANUP_RESULT" | sed 's/^/    /'
-    fi
-    echo ""
-done
+        
+        if echo "$CLEANUP_RESULT" | grep -q "SUCCESS:"; then
+            ((SUCCESSFUL++))
+            log_info "  ✓ Cleanup successful"
+            echo "$CLEANUP_RESULT" | grep "SUCCESS:" | sed 's/\[stdout\]//g' | sed 's/^/    /'
+        else
+            ((FAILED++))
+            log_error "  ✗ Cleanup failed"
+            echo "$CLEANUP_RESULT" | sed 's/^/    /'
+        fi
+        echo ""
+    done
+fi
 
 # Final Summary
 echo ""
@@ -233,9 +337,10 @@ log_info "=========================================="
 log_info "Cleanup Summary"
 log_info "=========================================="
 log_info "Resource Group: $RESOURCE_GROUP"
-log_info "Total VMs Processed: ${#VMS[@]}"
+log_info "Total VMs Found: ${#VMS[@]}"
+log_info "VMs with Backups: ${#VMS_WITH_BACKUPS[@]}"
 log_info "Successful: $SUCCESSFUL"
-log_info "Skipped: $SKIPPED"
+log_info "Skipped (no backup): $((${#VMS[@]} - ${#VMS_WITH_BACKUPS[@]}))"
 log_info "Failed: $FAILED"
 log_info "=========================================="
 
