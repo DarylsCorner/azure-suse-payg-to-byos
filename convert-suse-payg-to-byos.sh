@@ -211,33 +211,22 @@ log_info "=========================================="
 log_info "SUSE PAYG to BYOS Conversion"
 log_info "=========================================="
 log_info "Log file: $LOG_FILE"
-if [[ "$SKIP_REGISTRATION" == true ]]; then
-    log_warn "SKIP REGISTRATION MODE - Only cleanup and license change (use your own registration method)"
-elif [[ "$TEST_MODE" == true ]]; then
-    log_warn "TEST MODE ENABLED - SUSE Manager registration will be skipped"
-fi
-log_info "Starting SUSE PAYG to BYOS conversion process"
 log_info "Resource Group: $RESOURCE_GROUP"
 if [[ "$SKIP_REGISTRATION" == true ]]; then
-    log_info "SUSE Manager URL: N/A (skip-registration mode)"
+    log_warn "Mode: SKIP REGISTRATION (cleanup and license change only)"
+elif [[ "$TEST_MODE" == true ]]; then
+    log_warn "Mode: TEST (simulated SUSE Manager registration)"
 else
     log_info "SUSE Manager URL: $SUSE_MANAGER_URL"
 fi
-log_info "Execution Mode: $([ $PARALLEL_JOBS -eq 1 ] && echo 'Sequential' || echo "Parallel ($PARALLEL_JOBS jobs)")"
-log_info "Skip Registration: $SKIP_REGISTRATION"
-log_info "Test Mode: $TEST_MODE"
+log_info "Execution: $([ $PARALLEL_JOBS -eq 1 ] && echo 'Sequential' || echo "Parallel ($PARALLEL_JOBS concurrent)")"
 
 # Retrieve activation key from secure sources
 ACTIVATION_KEY=""
 SKIP_ACTIVATION_KEY=false
 
-# In skip-registration mode, activation key is not needed
-if [[ "$SKIP_REGISTRATION" == true ]]; then
-    log_info "Skip registration mode: Activation key is not required"
-    SKIP_ACTIVATION_KEY=true
-# In test mode, activation key is optional
-elif [[ "$TEST_MODE" == true ]]; then
-    log_info "Test mode: Activation key is optional"
+# In skip-registration or test mode, activation key is not needed
+if [[ "$SKIP_REGISTRATION" == true || "$TEST_MODE" == true ]]; then
     SKIP_ACTIVATION_KEY=true
 fi
 
@@ -279,8 +268,6 @@ else
         log_error "  2. Environment variable: export SUSE_ACTIVATION_KEY='your-key'"
         log_error "  3. Test mode: -t (skips SUSE Manager registration)"
         exit 1
-    else
-        log_info "Test mode: No activation key provided (will use simulated registration)"
     fi
 fi
 
@@ -709,6 +696,9 @@ if [[ $PARALLEL_JOBS -eq 1 ]]; then
     done
 else
     # Parallel execution
+    log_info "Processing ${#VMS[@]} VMs in parallel (max $PARALLEL_JOBS concurrent)..."
+    echo ""
+    
     for i in "${!VMS[@]}"; do
         VM_NUMBER=$((i + 1))
         
@@ -717,20 +707,24 @@ else
             sleep 2
         done
         
-        # Run conversion in background
+        # Run conversion in background (suppress PID output)
         (
             convert_vm "${VMS[$i]}" "$VM_NUMBER" "$TOTAL_VMS"
             echo $? > "$TEMP_DIR/${VMS[$i]}.status"
         ) &
-        
-        log_info "Started job for VM: ${VMS[$i]} (PID: $!)"
     done
     
-    # Wait for all background jobs to complete
-    log_info "Waiting for all conversion jobs to complete..."
-    wait
+    # Wait for all background jobs to complete with progress
+    echo -n "  Processing: "
+    while [ $(jobs -r | wc -l) -gt 0 ]; do
+        echo -n "."
+        sleep 3
+    done
+    echo " Done"
+    echo ""
     
-    # Collect results
+    # Collect and display results
+    log_info "Results:"
     for vm in "${VMS[@]}"; do
         if [ -f "$TEMP_DIR/$vm.status" ]; then
             EXIT_CODE=$(cat "$TEMP_DIR/$vm.status")
