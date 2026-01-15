@@ -548,9 +548,9 @@ zypper repos --uri | grep -E '(Enabled|URI)'
 fi
 
 vm_log "Running combined cleanup/register/validate script..."
-echo -n "  [VM Config] Executing"
 
-{
+# In parallel mode, suppress progress output to avoid messy interleaving
+if [[ $PARALLEL_JOBS -gt 1 ]]; then
     COMBINED_OUTPUT=$(az vm run-command invoke \
         -g "$RESOURCE_GROUP" \
         -n "$CURRENT_VM" \
@@ -558,15 +558,26 @@ echo -n "  [VM Config] Executing"
         --scripts "$COMBINED_SCRIPT" \
         --output json 2>&1)
     echo "$COMBINED_OUTPUT" > /tmp/combined_output_$CURRENT_VM
-} &
-COMBINED_PID=$!
+else
+    echo -n "  [VM Config] Executing"
+    {
+        COMBINED_OUTPUT=$(az vm run-command invoke \
+            -g "$RESOURCE_GROUP" \
+            -n "$CURRENT_VM" \
+            --command-id RunShellScript \
+            --scripts "$COMBINED_SCRIPT" \
+            --output json 2>&1)
+        echo "$COMBINED_OUTPUT" > /tmp/combined_output_$CURRENT_VM
+    } &
+    COMBINED_PID=$!
 
-while kill -0 $COMBINED_PID 2>/dev/null; do
-    echo -n "."
-    sleep 3
-done
-wait $COMBINED_PID
-echo " Done"
+    while kill -0 $COMBINED_PID 2>/dev/null; do
+        echo -n "."
+        sleep 3
+    done
+    wait $COMBINED_PID
+    echo " Done"
+fi
 
 COMBINED_OUTPUT=$(cat /tmp/combined_output_$CURRENT_VM)
 rm -f /tmp/combined_output_$CURRENT_VM
@@ -590,23 +601,31 @@ vm_log "Configuration completed"
 
 # Step 2: Update Azure license type
 vm_log "Step 2: Updating Azure license type to SLES_BYOS..."
-echo -n "  [License] Updating"
 
-{
+if [[ $PARALLEL_JOBS -gt 1 ]]; then
     LICENSE_UPDATE_OUTPUT=$(az vm update \
         -g "$RESOURCE_GROUP" \
         -n "$CURRENT_VM" \
         --license-type SLES_BYOS 2>&1)
     echo "$LICENSE_UPDATE_OUTPUT" > /tmp/license_output_$CURRENT_VM
-} &
-LIC_PID=$!
+else
+    echo -n "  [License] Updating"
+    {
+        LICENSE_UPDATE_OUTPUT=$(az vm update \
+            -g "$RESOURCE_GROUP" \
+            -n "$CURRENT_VM" \
+            --license-type SLES_BYOS 2>&1)
+        echo "$LICENSE_UPDATE_OUTPUT" > /tmp/license_output_$CURRENT_VM
+    } &
+    LIC_PID=$!
 
-while kill -0 $LIC_PID 2>/dev/null; do
-    echo -n "."
-    sleep 3
-done
-wait $LIC_PID
-echo " Done"
+    while kill -0 $LIC_PID 2>/dev/null; do
+        echo -n "."
+        sleep 3
+    done
+    wait $LIC_PID
+    echo " Done"
+fi
 
 LICENSE_UPDATE_OUTPUT=$(cat /tmp/license_output_$CURRENT_VM)
 rm -f /tmp/license_output_$CURRENT_VM
@@ -615,20 +634,25 @@ vm_log "License type updated successfully"
 
 # Step 3: Verify Azure license type
 vm_log "Step 3: Verifying Azure license type..."
-echo -n "  [License Check] Verifying"
 
-{
+if [[ $PARALLEL_JOBS -gt 1 ]]; then
     NEW_LICENSE=$(az vm show -g "$RESOURCE_GROUP" -n "$CURRENT_VM" --query licenseType -o tsv 2>&1 | tr -d '\r\n')
     echo "$NEW_LICENSE" > /tmp/license_check_$CURRENT_VM
-} &
-LIC_CHK_PID=$!
+else
+    echo -n "  [License Check] Verifying"
+    {
+        NEW_LICENSE=$(az vm show -g "$RESOURCE_GROUP" -n "$CURRENT_VM" --query licenseType -o tsv 2>&1 | tr -d '\r\n')
+        echo "$NEW_LICENSE" > /tmp/license_check_$CURRENT_VM
+    } &
+    LIC_CHK_PID=$!
 
-while kill -0 $LIC_CHK_PID 2>/dev/null; do
-    echo -n "."
-    sleep 3
-done
-wait $LIC_CHK_PID
-echo " Done"
+    while kill -0 $LIC_CHK_PID 2>/dev/null; do
+        echo -n "."
+        sleep 3
+    done
+    wait $LIC_CHK_PID
+    echo " Done"
+fi
 
 NEW_LICENSE=$(cat /tmp/license_check_$CURRENT_VM)
 rm -f /tmp/license_check_$CURRENT_VM
@@ -652,6 +676,7 @@ TOTAL_VMS=${#VMS[@]}
 SUCCESSFUL=0
 FAILED=0
 SKIPPED=0
+CONVERTED_VMS=()  # Track VMs that were actually converted (not skipped)
 
 # Create temporary directory for job tracking
 TEMP_DIR=$(mktemp -d)
@@ -667,6 +692,7 @@ if [[ $PARALLEL_JOBS -eq 1 ]]; then
         
         if [ $EXIT_CODE -eq 0 ]; then
             ((SUCCESSFUL++))
+            CONVERTED_VMS+=("${VMS[$i]}")
         elif [ $EXIT_CODE -eq 2 ]; then
             ((SKIPPED++))
             log_info "⊙ Skipped VM (already BYOS): ${VMS[$i]}"
@@ -710,6 +736,7 @@ else
             EXIT_CODE=$(cat "$TEMP_DIR/$vm.status")
             if [ $EXIT_CODE -eq 0 ]; then
                 ((SUCCESSFUL++))
+                CONVERTED_VMS+=("$vm")
             elif [ $EXIT_CODE -eq 2 ]; then
                 ((SKIPPED++))
                 log_info "⊙ Skipped VM (already BYOS): $vm"
@@ -724,8 +751,8 @@ else
     done
 fi
 
-# Post-conversion validation: Check repositories on all BYOS VMs (parallel)
-if [[ $SUCCESSFUL -gt 0 || $SKIPPED -gt 0 ]]; then
+# Post-conversion validation: Check repositories only on CONVERTED VMs (not skipped ones)
+if [[ $SUCCESSFUL -gt 0 ]]; then
     echo ""
     log_info "=========================================="
     if [[ "$SKIP_REGISTRATION" == true ]]; then
@@ -735,13 +762,10 @@ if [[ $SUCCESSFUL -gt 0 || $SKIPPED -gt 0 ]]; then
     fi
     log_info "=========================================="
     
-    # Run validation checks in parallel
-    for vm in "${VMS[@]}"; do
+    # Run validation checks in parallel (only on converted VMs)
+    for vm in "${CONVERTED_VMS[@]}"; do
         (
-            # Check if VM is BYOS
-            LICENSE=$(az vm show -g "$RESOURCE_GROUP" -n "$vm" --query licenseType -o tsv 2>&1 | tr -d '\r\n')
-            if [[ "$LICENSE" == "SLES_BYOS" ]]; then
-                if [[ "$SKIP_REGISTRATION" == true ]]; then
+            if [[ "$SKIP_REGISTRATION" == true ]]; then
                     # For skip-registration mode, check that repos are removed and backup exists
                     CLEANUP_CHECK=$(az vm run-command invoke \
                         -g "$RESOURCE_GROUP" \
@@ -760,26 +784,25 @@ if [[ $SUCCESSFUL -gt 0 || $SKIPPED -gt 0 ]]; then
                     else
                         echo "⚠|$vm|Cleanup may be incomplete - $CURRENT_COUNT repos remain"
                     fi
-                else
-                    REPO_CHECK=$(az vm run-command invoke \
-                        -g "$RESOURCE_GROUP" \
-                        -n "$vm" \
-                        --command-id RunShellScript \
-                        --scripts "zypper lr -u 2>/dev/null || echo 'No repositories found'" \
-                        --query 'value[0].message' -o tsv 2>&1)
-                    
-                    if [[ "$TEST_MODE" == true ]]; then
-                        if echo "$REPO_CHECK" | grep -q "TEST-SUSE-Manager"; then
-                            echo "✓|$vm|Test repository configured"
-                        else
-                            echo "⚠|$vm|Test repository not found"
-                        fi
+            else
+                REPO_CHECK=$(az vm run-command invoke \
+                    -g "$RESOURCE_GROUP" \
+                    -n "$vm" \
+                    --command-id RunShellScript \
+                    --scripts "zypper lr -u 2>/dev/null || echo 'No repositories found'" \
+                    --query 'value[0].message' -o tsv 2>&1)
+                
+                if [[ "$TEST_MODE" == true ]]; then
+                    if echo "$REPO_CHECK" | grep -q "TEST-SUSE-Manager"; then
+                        echo "✓|$vm|Test repository configured"
                     else
-                        if echo "$REPO_CHECK" | grep -qi "suse.*manager\|rmt\|smt"; then
-                            echo "✓|$vm|SUSE Manager repository detected"
-                        else
-                            echo "⚠|$vm|No SUSE Manager repository found - please verify manually"
-                        fi
+                        echo "⚠|$vm|Test repository not found"
+                    fi
+                else
+                    if echo "$REPO_CHECK" | grep -qi "suse.*manager\|rmt\|smt"; then
+                        echo "✓|$vm|SUSE Manager repository detected"
+                    else
+                        echo "⚠|$vm|No SUSE Manager repository found - please verify manually"
                     fi
                 fi
             fi
@@ -790,7 +813,7 @@ if [[ $SUCCESSFUL -gt 0 || $SKIPPED -gt 0 ]]; then
     wait
     
     # Display results in order
-    for vm in "${VMS[@]}"; do
+    for vm in "${CONVERTED_VMS[@]}"; do
         if [ -f "$TEMP_DIR/validation_$vm.txt" ]; then
             RESULT=$(cat "$TEMP_DIR/validation_$vm.txt")
             if [[ -n "$RESULT" ]]; then
