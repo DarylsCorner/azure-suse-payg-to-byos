@@ -210,7 +210,6 @@ LOG_FILE="${RUN_LOG_DIR}/main.log"
 log_info "=========================================="
 log_info "SUSE PAYG to BYOS Conversion"
 log_info "=========================================="
-log_info "Log file: $LOG_FILE"
 log_info "Resource Group: $RESOURCE_GROUP"
 if [[ "$SKIP_REGISTRATION" == true ]]; then
     log_warn "Mode: SKIP REGISTRATION (cleanup and license change only)"
@@ -337,6 +336,8 @@ if [[ "$SKIP_REGISTRATION" == true ]]; then
 else
     echo "  4. Validate repository configuration"
 fi
+echo ""
+echo "  Note: VMs already with SLES_BYOS license will be skipped."
 echo ""
 
 if [[ "$AUTO_CONFIRM" == true ]]; then
