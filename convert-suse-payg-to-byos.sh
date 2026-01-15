@@ -82,11 +82,16 @@ Required parameters:
 
 SUSE Manager Registration (choose one mode):
     -s                SUSE Manager server URL (e.g., suse-manager.example.com)
-                      Required unless using --skip-registration
+                      Required unless using --skip-registration or --license-only
     
     --skip-registration
                       Skip SUSE Manager registration (cleanup and license change only)
                       Use when you have your own registration method (e.g., Ansible playbook)
+    
+    --license-only
+                      Only change Azure license type (no VM-side cleanup or registration)
+                      Azure's guestregister service will auto-remove PAYG repos
+                      Fastest option - no backup created
 
 Activation Key (required for SUSE Manager registration, not needed with --skip-registration or -t):
     --keyvault        Azure Key Vault name containing the activation key (most secure)
@@ -121,6 +126,9 @@ Examples:
     
     # Skip registration (use your own Ansible/Puppet/Chef for SUSE Manager registration)
     $0 -g prod-sap-rg --skip-registration -y
+    
+    # License only - fastest option, Azure auto-cleans PAYG repos (no backup)
+    $0 -g prod-sap-rg --license-only -p 5 -y
 
 Security Notes:
     - Activation keys are retrieved securely from Key Vault or environment variables
@@ -137,6 +145,7 @@ AUTO_CONFIRM=false
 KEYVAULT_NAME=""
 SECRET_NAME=""
 SKIP_REGISTRATION=false
+LICENSE_ONLY=false
 
 # Parse long options first
 ARGS=()
@@ -152,6 +161,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-registration)
             SKIP_REGISTRATION=true
+            shift
+            ;;
+        --license-only)
+            LICENSE_ONLY=true
             shift
             ;;
         *)
@@ -184,9 +197,9 @@ if [[ -z "$RESOURCE_GROUP" ]]; then
     usage
 fi
 
-# Validate SUSE Manager URL unless skipping registration
-if [[ "$SKIP_REGISTRATION" == false && -z "$SUSE_MANAGER_URL" ]]; then
-    log_error "Missing required parameter: SUSE Manager URL (-s) or use --skip-registration"
+# Validate SUSE Manager URL unless skipping registration or license-only mode
+if [[ "$SKIP_REGISTRATION" == false && "$LICENSE_ONLY" == false && -z "$SUSE_MANAGER_URL" ]]; then
+    log_error "Missing required parameter: SUSE Manager URL (-s) or use --skip-registration or --license-only"
     usage
 fi
 
@@ -211,7 +224,9 @@ log_info "=========================================="
 log_info "SUSE PAYG to BYOS Conversion"
 log_info "=========================================="
 log_info "Resource Group: $RESOURCE_GROUP"
-if [[ "$SKIP_REGISTRATION" == true ]]; then
+if [[ "$LICENSE_ONLY" == true ]]; then
+    log_warn "Mode: LICENSE ONLY (Azure auto-cleanup, no backup, no registration)"
+elif [[ "$SKIP_REGISTRATION" == true ]]; then
     log_warn "Mode: SKIP REGISTRATION (cleanup and license change only)"
 elif [[ "$TEST_MODE" == true ]]; then
     log_warn "Mode: TEST (simulated SUSE Manager registration)"
@@ -224,8 +239,8 @@ log_info "Execution: $([ $PARALLEL_JOBS -eq 1 ] && echo 'Sequential' || echo "Pa
 ACTIVATION_KEY=""
 SKIP_ACTIVATION_KEY=false
 
-# In skip-registration or test mode, activation key is not needed
-if [[ "$SKIP_REGISTRATION" == true || "$TEST_MODE" == true ]]; then
+# In skip-registration, test, or license-only mode, activation key is not needed
+if [[ "$SKIP_REGISTRATION" == true || "$TEST_MODE" == true || "$LICENSE_ONLY" == true ]]; then
     SKIP_ACTIVATION_KEY=true
 fi
 
@@ -324,17 +339,24 @@ fi
 # Confirm before proceeding
 echo ""
 log_warn "This script will perform the following actions on ${#VMS[@]} VM(s):"
-echo "  1. Clean up PAYG SUSE registration on each VM"
-if [[ "$SKIP_REGISTRATION" == true ]]; then
-    echo "  2. SKIP SUSE Manager registration (use your own method)"
+if [[ "$LICENSE_ONLY" == true ]]; then
+    echo "  1. Change Azure license type to SLES_BYOS (only)"
+    echo ""
+    echo "  Note: Azure's guestregister service will auto-cleanup PAYG repos"
+    echo "  Note: No backup will be created"
 else
-    echo "  2. Register each VM to SUSE Manager at $SUSE_MANAGER_URL"
-fi
-echo "  3. Change Azure license type to SLES_BYOS"
-if [[ "$SKIP_REGISTRATION" == true ]]; then
-    echo "  4. Validate cleanup completed"
-else
-    echo "  4. Validate repository configuration"
+    echo "  1. Clean up PAYG SUSE registration on each VM"
+    if [[ "$SKIP_REGISTRATION" == true ]]; then
+        echo "  2. SKIP SUSE Manager registration (use your own method)"
+    else
+        echo "  2. Register each VM to SUSE Manager at $SUSE_MANAGER_URL"
+    fi
+    echo "  3. Change Azure license type to SLES_BYOS"
+    if [[ "$SKIP_REGISTRATION" == true ]]; then
+        echo "  4. Validate cleanup completed"
+    else
+        echo "  4. Validate repository configuration"
+    fi
 fi
 echo ""
 echo "  Note: VMs already with SLES_BYOS license will be skipped."
@@ -396,12 +418,17 @@ convert_vm() {
         return 2  # Return 2 to indicate skipped
     fi
 
-# Combined Step: Cleanup, Register, and Validate in ONE run-command
-if [[ "$SKIP_REGISTRATION" == true ]]; then
-    vm_log "Executing VM configuration (cleanup only - registration skipped)..."
+# License-only mode: Skip all VM-side operations, only update Azure license
+if [[ "$LICENSE_ONLY" == true ]]; then
+    vm_log "License-only mode: Skipping VM-side operations"
+    vm_log "Azure's guestregister service will auto-cleanup PAYG repos when license changes"
 else
-    vm_log "Executing VM configuration (cleanup, register, validate)..."
-fi
+    # Combined Step: Cleanup, Register, and Validate in ONE run-command
+    if [[ "$SKIP_REGISTRATION" == true ]]; then
+        vm_log "Executing VM configuration (cleanup only - registration skipped)..."
+    else
+        vm_log "Executing VM configuration (cleanup, register, validate)..."
+    fi
 
 if [[ "$SKIP_REGISTRATION" == true ]]; then
     # Skip registration mode - cleanup only, no SUSE Manager registration
@@ -586,9 +613,14 @@ else
     done
 fi
 vm_log "Configuration completed"
+fi  # End of license-only check
 
-# Step 2: Update Azure license type
-vm_log "Step 2: Updating Azure license type to SLES_BYOS..."
+# Update Azure license type
+if [[ "$LICENSE_ONLY" == true ]]; then
+    vm_log "Updating Azure license type to SLES_BYOS..."
+else
+    vm_log "Step 2: Updating Azure license type to SLES_BYOS..."
+fi
 
 if [[ $PARALLEL_JOBS -gt 1 ]]; then
     LICENSE_UPDATE_OUTPUT=$(az vm update \
@@ -620,8 +652,12 @@ rm -f /tmp/license_output_$CURRENT_VM
 
 vm_log "License type updated successfully"
 
-# Step 3: Verify Azure license type
-vm_log "Step 3: Verifying Azure license type..."
+# Verify Azure license type
+if [[ "$LICENSE_ONLY" == true ]]; then
+    vm_log "Verifying Azure license type..."
+else
+    vm_log "Step 3: Verifying Azure license type..."
+fi
 
 if [[ $PARALLEL_JOBS -gt 1 ]]; then
     NEW_LICENSE=$(az vm show -g "$RESOURCE_GROUP" -n "$CURRENT_VM" --query licenseType -o tsv 2>&1 | tr -d '\r\n')
@@ -747,7 +783,8 @@ else
 fi
 
 # Post-conversion validation: Check repositories only on CONVERTED VMs (not skipped ones)
-if [[ $SUCCESSFUL -gt 0 ]]; then
+# Skip validation entirely for license-only mode (no VM-side operations were performed)
+if [[ $SUCCESSFUL -gt 0 && "$LICENSE_ONLY" != true ]]; then
     echo ""
     log_info "=========================================="
     if [[ "$SKIP_REGISTRATION" == true ]]; then

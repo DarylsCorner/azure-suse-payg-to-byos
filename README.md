@@ -91,6 +91,7 @@ chmod +x convert-suse-payg-to-byos.sh
 | `--keyvault` | No* | Azure Key Vault name containing activation key |
 | `--secret-name` | No* | Secret name in Key Vault (use with --keyvault) |
 | `--skip-registration` | No | Skip SUSE Manager registration (cleanup and license change only) |
+| `--license-only` | No | License change only (no VM-side operations, Azure auto-cleanup) |
 | `-n` | No | VM name (if omitted, converts ALL SLES VMs in resource group) |
 | `-p` | No | Number of parallel jobs (default: 1 for sequential). Recommended: 5-10 |
 | `-t` | No | Test mode - skips SUSE Manager registration |
@@ -98,8 +99,8 @@ chmod +x convert-suse-payg-to-byos.sh
 | `-h` | No | Display help message |
 
 **Notes:**
-- Either `--keyvault`/`--secret-name` OR environment variable `SUSE_ACTIVATION_KEY` must be set (unless using `-t` test mode or `--skip-registration`)
-- `-s` is required unless using `--skip-registration`
+- Either `--keyvault`/`--secret-name` OR environment variable `SUSE_ACTIVATION_KEY` must be set (unless using `-t` test mode, `--skip-registration`, or `--license-only`)
+- `-s` is required unless using `--skip-registration` or `--license-only`
 
 ## What the Script Does
 
@@ -199,6 +200,46 @@ ansible-playbook -i inventory suse-manager-register.yml
 - Shows how many repos were backed up (e.g., "70 repos backed up")
 - Confirms current repos directory is empty (ready for registration)
 
+### License-Only Mode (`--license-only`)
+
+Use this mode when you want the **fastest possible conversion** with minimal VM interaction. This is ideal when:
+- Azure's automatic cleanup is sufficient for your environment
+- You don't need manual backups of existing repos
+- You want the quickest conversion time
+
+**How it works:**
+- The script **only changes the Azure license type** from PAYG to SLES_BYOS
+- Azure's `guestregister` service automatically detects the license change
+- The guestregister service then cleans up PAYG repositories on the VM
+- No SSH/run-command is executed on the VM
+- **No backup is created** (Azure handles cleanup automatically)
+
+**When to use:**
+| Mode | Backup Created | SUSE Manager | Speed | Use Case |
+|------|----------------|--------------|-------|----------|
+| Full (default) | Yes | Yes | Slowest | Complete conversion with SUSE Manager |
+| `--skip-registration` | Yes | No | Medium | Use your own Ansible/Puppet for registration |
+| `--license-only` | No | No | Fastest | Trust Azure auto-cleanup, register later |
+
+```bash
+# License change only - Azure handles PAYG cleanup automatically
+./convert-suse-payg-to-byos.sh \
+  -g prod-sap-rg \
+  --license-only \
+  -p 10 \
+  -y
+
+# Then run your registration method
+ansible-playbook -i inventory suse-manager-register.yml
+```
+
+**Note:** After using `--license-only`, the VM's guestregister service will automatically:
+1. Detect the license type change
+2. Stop the guestregister service
+3. Remove PAYG repository configurations
+
+This typically happens within a few minutes of the license change.
+
 ## Example Usage
 
 ```bash
@@ -251,6 +292,13 @@ export SUSE_ACTIVATION_KEY="dev-key-12345"
   -g prod-sap-rg \
   --skip-registration \
   -p 5 \
+  -y
+
+# License only - fastest option, Azure auto-cleans PAYG repos (no backup)
+./convert-suse-payg-to-byos.sh \
+  -g prod-sap-rg \
+  --license-only \
+  -p 10 \
   -y
 ```
 
