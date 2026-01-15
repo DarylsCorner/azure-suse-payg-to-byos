@@ -87,16 +87,19 @@ chmod +x convert-suse-payg-to-byos.sh
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `-g` | Yes | Azure resource group name |
-| `-s` | Yes | SUSE Manager server URL (e.g., suse-manager.example.com) |
+| `-s` | Yes* | SUSE Manager server URL (e.g., suse-manager.example.com) |
 | `--keyvault` | No* | Azure Key Vault name containing activation key |
 | `--secret-name` | No* | Secret name in Key Vault (use with --keyvault) |
+| `--skip-registration` | No | Skip SUSE Manager registration (cleanup and license change only) |
 | `-n` | No | VM name (if omitted, converts ALL SLES VMs in resource group) |
 | `-p` | No | Number of parallel jobs (default: 1 for sequential). Recommended: 5-10 |
 | `-t` | No | Test mode - skips SUSE Manager registration |
 | `-y` | No | Auto-confirm (skip confirmation prompt) |
 | `-h` | No | Display help message |
 
-**Note:** Either `--keyvault`/`--secret-name` OR environment variable `SUSE_ACTIVATION_KEY` must be set (unless using `-t` test mode)
+**Notes:**
+- Either `--keyvault`/`--secret-name` OR environment variable `SUSE_ACTIVATION_KEY` must be set (unless using `-t` test mode or `--skip-registration`)
+- `-s` is required unless using `--skip-registration`
 
 ## What the Script Does
 
@@ -104,6 +107,7 @@ For each VM:
 1. **Check existing license**: Skips VMs already configured with SLES_BYOS
 2. **Cleanup PAYG Registration**: Removes SUSE Public Cloud registration and PAYG repositories
 3. **Register to SUSE Manager**: Installs bootstrap script and registers VM to your SUSE Manager
+   - *Or skipped if using `--skip-registration` (for external registration methods)*
 4. **Update Azure License**: Changes the Azure license type to `SLES_BYOS`
 5. **Validate Configuration**: Verifies repository configuration and license type
 
@@ -165,6 +169,35 @@ Once you've verified the conversion was successful and no longer need the backed
 - **Minimal downtime**: Most operations don't require VM restart
 - **Reversible**: Keep backups of repository configurations (auto-saved to `/etc/zypp/repos.d.backup/`)
 - **Detailed logging**: Main log file + individual per-VM log files for easy troubleshooting
+- **Skip registration mode**: Use `--skip-registration` for external registration methods (Ansible, Puppet, Chef, etc.)
+
+## Skip Registration Mode
+
+Use `--skip-registration` when you have your own method for SUSE Manager registration (e.g., Ansible playbook, Puppet, Chef, or other configuration management tools).
+
+**What it does:**
+1. Cleans up PAYG registration and repos (with backup)
+2. Changes Azure license type to SLES_BYOS
+3. Validates cleanup was successful
+4. **Skips** SUSE Manager bootstrap script
+
+**Use case:** Your organization uses Ansible or another tool to register systems with SUSE Manager. This script handles the Azure-side conversion while your existing automation handles the SUSE registration.
+
+```bash
+# Run cleanup and license change only - register with your own method afterward
+./convert-suse-payg-to-byos.sh \
+  -g prod-sap-rg \
+  --skip-registration \
+  -p 5 \
+  -y
+
+# Then run your Ansible playbook to register with SUSE Manager
+ansible-playbook -i inventory suse-manager-register.yml
+```
+
+**Validation output in skip-registration mode:**
+- Shows how many repos were backed up (e.g., "70 repos backed up")
+- Confirms current repos directory is empty (ready for registration)
 
 ## Example Usage
 
@@ -212,6 +245,13 @@ export SUSE_ACTIVATION_KEY="dev-key-12345"
 ./convert-suse-payg-to-byos.sh \
   -g dev-rg \
   -s suse-manager-dev.company.com
+
+# Skip registration - use when you have your own registration method (Ansible, Puppet, etc.)
+./convert-suse-payg-to-byos.sh \
+  -g prod-sap-rg \
+  --skip-registration \
+  -p 5 \
+  -y
 ```
 
 ## Post-Conversion Validation
