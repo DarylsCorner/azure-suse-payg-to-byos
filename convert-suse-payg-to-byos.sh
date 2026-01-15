@@ -75,13 +75,20 @@ validate_url() {
 # Function to display usage
 usage() {
     cat << EOF
-Usage: $0 -g <resource-group> -s <suse-manager-url> [OPTIONS]
+Usage: $0 -g <resource-group> [OPTIONS]
 
 Required parameters:
     -g                Resource group name
-    -s                SUSE Manager server URL (e.g., suse-manager.example.com)
 
-Activation Key (choose one method - not required in test mode):
+SUSE Manager Registration (choose one mode):
+    -s                SUSE Manager server URL (e.g., suse-manager.example.com)
+                      Required unless using --skip-registration
+    
+    --skip-registration
+                      Skip SUSE Manager registration (cleanup and license change only)
+                      Use when you have your own registration method (e.g., Ansible playbook)
+
+Activation Key (required for SUSE Manager registration, not needed with --skip-registration or -t):
     --keyvault        Azure Key Vault name containing the activation key (most secure)
     --secret-name     Secret name in Key Vault for the activation key
                       Example: --keyvault MyVault --secret-name suse-activation-key
@@ -111,6 +118,9 @@ Examples:
     # Parallel execution with Key Vault
     $0 -g prod-sap-rg -s suse-manager.company.com \\
        --keyvault WorkloadKeyVault --secret-name suse-activation-key -p 3
+    
+    # Skip registration (use your own Ansible/Puppet/Chef for SUSE Manager registration)
+    $0 -g prod-sap-rg --skip-registration -y
 
 Security Notes:
     - Activation keys are retrieved securely from Key Vault or environment variables
@@ -126,6 +136,7 @@ TEST_MODE=false
 AUTO_CONFIRM=false
 KEYVAULT_NAME=""
 SECRET_NAME=""
+SKIP_REGISTRATION=false
 
 # Parse long options first
 ARGS=()
@@ -138,6 +149,10 @@ while [[ $# -gt 0 ]]; do
         --secret-name)
             SECRET_NAME="$2"
             shift 2
+            ;;
+        --skip-registration)
+            SKIP_REGISTRATION=true
+            shift
             ;;
         *)
             ARGS+=("$1")
@@ -164,13 +179,19 @@ while getopts "g:n:s:p:tyh" opt; do
 done
 
 # Validate required parameters
-if [[ -z "$RESOURCE_GROUP" || -z "$SUSE_MANAGER_URL" ]]; then
-    log_error "Missing required parameters"
+if [[ -z "$RESOURCE_GROUP" ]]; then
+    log_error "Missing required parameter: resource group (-g)"
     usage
 fi
 
-# Validate URL format
-if ! validate_url "$SUSE_MANAGER_URL"; then
+# Validate SUSE Manager URL unless skipping registration
+if [[ "$SKIP_REGISTRATION" == false && -z "$SUSE_MANAGER_URL" ]]; then
+    log_error "Missing required parameter: SUSE Manager URL (-s) or use --skip-registration"
+    usage
+fi
+
+# Validate URL format (only if provided)
+if [[ -n "$SUSE_MANAGER_URL" ]] && ! validate_url "$SUSE_MANAGER_URL"; then
     exit 1
 fi
 
@@ -190,21 +211,32 @@ log_info "=========================================="
 log_info "SUSE PAYG to BYOS Conversion"
 log_info "=========================================="
 log_info "Log file: $LOG_FILE"
-if [[ "$TEST_MODE" == true ]]; then
+if [[ "$SKIP_REGISTRATION" == true ]]; then
+    log_warn "SKIP REGISTRATION MODE - Only cleanup and license change (use your own registration method)"
+elif [[ "$TEST_MODE" == true ]]; then
     log_warn "TEST MODE ENABLED - SUSE Manager registration will be skipped"
 fi
 log_info "Starting SUSE PAYG to BYOS conversion process"
 log_info "Resource Group: $RESOURCE_GROUP"
-log_info "SUSE Manager URL: $SUSE_MANAGER_URL"
+if [[ "$SKIP_REGISTRATION" == true ]]; then
+    log_info "SUSE Manager URL: N/A (skip-registration mode)"
+else
+    log_info "SUSE Manager URL: $SUSE_MANAGER_URL"
+fi
 log_info "Execution Mode: $([ $PARALLEL_JOBS -eq 1 ] && echo 'Sequential' || echo "Parallel ($PARALLEL_JOBS jobs)")"
+log_info "Skip Registration: $SKIP_REGISTRATION"
 log_info "Test Mode: $TEST_MODE"
 
 # Retrieve activation key from secure sources
 ACTIVATION_KEY=""
 SKIP_ACTIVATION_KEY=false
 
+# In skip-registration mode, activation key is not needed
+if [[ "$SKIP_REGISTRATION" == true ]]; then
+    log_info "Skip registration mode: Activation key is not required"
+    SKIP_ACTIVATION_KEY=true
 # In test mode, activation key is optional
-if [[ "$TEST_MODE" == true ]]; then
+elif [[ "$TEST_MODE" == true ]]; then
     log_info "Test mode: Activation key is optional"
     SKIP_ACTIVATION_KEY=true
 fi
@@ -307,9 +339,17 @@ fi
 echo ""
 log_warn "This script will perform the following actions on ${#VMS[@]} VM(s):"
 echo "  1. Clean up PAYG SUSE registration on each VM"
-echo "  2. Register each VM to SUSE Manager at $SUSE_MANAGER_URL"
+if [[ "$SKIP_REGISTRATION" == true ]]; then
+    echo "  2. SKIP SUSE Manager registration (use your own method)"
+else
+    echo "  2. Register each VM to SUSE Manager at $SUSE_MANAGER_URL"
+fi
 echo "  3. Change Azure license type to SLES_BYOS"
-echo "  4. Validate repository configuration"
+if [[ "$SKIP_REGISTRATION" == true ]]; then
+    echo "  4. Validate cleanup completed"
+else
+    echo "  4. Validate repository configuration"
+fi
 echo ""
 
 if [[ "$AUTO_CONFIRM" == true ]]; then
@@ -369,9 +409,49 @@ convert_vm() {
     fi
 
 # Combined Step: Cleanup, Register, and Validate in ONE run-command
-vm_log "Executing VM configuration (cleanup, register, validate)..."
+if [[ "$SKIP_REGISTRATION" == true ]]; then
+    vm_log "Executing VM configuration (cleanup only - registration skipped)..."
+else
+    vm_log "Executing VM configuration (cleanup, register, validate)..."
+fi
 
-if [[ "$TEST_MODE" == true ]]; then
+if [[ "$SKIP_REGISTRATION" == true ]]; then
+    # Skip registration mode - cleanup only, no SUSE Manager registration
+    COMBINED_SCRIPT="
+#!/bin/bash
+set -e
+echo '=== STEP 1: PAYG Cleanup ==='
+# Stop and disable guestregister service
+if systemctl list-units --type=service | grep -q guestregister; then
+    systemctl stop guestregister.service 2>/dev/null || true
+    systemctl disable guestregister.service 2>/dev/null || true
+fi
+
+# Backup and remove PAYG repos
+if [ -d /etc/zypp/repos.d ]; then
+    mkdir -p /etc/zypp/repos.d.backup
+    cp /etc/zypp/repos.d/*.repo /etc/zypp/repos.d.backup/ 2>/dev/null || true
+    rm -f /etc/zypp/repos.d/*.repo || true
+fi
+
+# Remove registration files
+rm -rf /var/cache/cloudregister/* 2>/dev/null || true
+rm -f /etc/regionserverclnt.cfg 2>/dev/null || true
+echo 'Cleanup completed'
+
+echo ''
+echo '=== STEP 2: SUSE Manager Registration (SKIPPED) ==='
+echo 'Registration skipped - use your own method (Ansible, Puppet, etc.)'
+echo 'PAYG repos have been backed up to /etc/zypp/repos.d.backup/'
+
+echo ''
+echo '=== STEP 3: Validation ==='
+echo 'Backup repos count:'
+ls /etc/zypp/repos.d.backup/*.repo 2>/dev/null | wc -l
+echo 'Current repos (should be empty):'
+ls /etc/zypp/repos.d/*.repo 2>/dev/null | wc -l || echo '0'
+"
+elif [[ "$TEST_MODE" == true ]]; then
     # Test mode - combined script
     COMBINED_SCRIPT="
 #!/bin/bash
@@ -648,7 +728,11 @@ fi
 if [[ $SUCCESSFUL -gt 0 || $SKIPPED -gt 0 ]]; then
     echo ""
     log_info "=========================================="
-    log_info "Post-Conversion Repository Validation"
+    if [[ "$SKIP_REGISTRATION" == true ]]; then
+        log_info "Post-Conversion Cleanup Validation"
+    else
+        log_info "Post-Conversion Repository Validation"
+    fi
     log_info "=========================================="
     
     # Run validation checks in parallel
@@ -657,24 +741,45 @@ if [[ $SUCCESSFUL -gt 0 || $SKIPPED -gt 0 ]]; then
             # Check if VM is BYOS
             LICENSE=$(az vm show -g "$RESOURCE_GROUP" -n "$vm" --query licenseType -o tsv 2>&1 | tr -d '\r\n')
             if [[ "$LICENSE" == "SLES_BYOS" ]]; then
-                REPO_CHECK=$(az vm run-command invoke \
-                    -g "$RESOURCE_GROUP" \
-                    -n "$vm" \
-                    --command-id RunShellScript \
-                    --scripts "zypper lr -u 2>/dev/null || echo 'No repositories found'" \
-                    --query 'value[0].message' -o tsv 2>&1)
-                
-                if [[ "$TEST_MODE" == true ]]; then
-                    if echo "$REPO_CHECK" | grep -q "TEST-SUSE-Manager"; then
-                        echo "✓|$vm|Test repository configured"
+                if [[ "$SKIP_REGISTRATION" == true ]]; then
+                    # For skip-registration mode, check that repos are removed and backup exists
+                    CLEANUP_CHECK=$(az vm run-command invoke \
+                        -g "$RESOURCE_GROUP" \
+                        -n "$vm" \
+                        --command-id RunShellScript \
+                        --scripts "echo 'Current repos:' && ls /etc/zypp/repos.d/*.repo 2>/dev/null | wc -l && echo 'Backup repos:' && ls /etc/zypp/repos.d.backup/*.repo 2>/dev/null | wc -l" \
+                        --query 'value[0].message' -o tsv 2>&1)
+                    
+                    CURRENT_COUNT=$(echo "$CLEANUP_CHECK" | grep -A1 "Current repos:" | tail -1 | tr -d '[:space:]')
+                    BACKUP_COUNT=$(echo "$CLEANUP_CHECK" | grep -A1 "Backup repos:" | tail -1 | tr -d '[:space:]')
+                    
+                    if [[ "$CURRENT_COUNT" == "0" && "$BACKUP_COUNT" -gt 0 ]]; then
+                        echo "✓|$vm|Cleanup complete - $BACKUP_COUNT repos backed up, ready for registration"
+                    elif [[ "$CURRENT_COUNT" == "0" ]]; then
+                        echo "✓|$vm|Cleanup complete - repos removed"
                     else
-                        echo "⚠|$vm|Test repository not found"
+                        echo "⚠|$vm|Cleanup may be incomplete - $CURRENT_COUNT repos remain"
                     fi
                 else
-                    if echo "$REPO_CHECK" | grep -qi "suse.*manager\|rmt\|smt"; then
-                        echo "✓|$vm|SUSE Manager repository detected"
+                    REPO_CHECK=$(az vm run-command invoke \
+                        -g "$RESOURCE_GROUP" \
+                        -n "$vm" \
+                        --command-id RunShellScript \
+                        --scripts "zypper lr -u 2>/dev/null || echo 'No repositories found'" \
+                        --query 'value[0].message' -o tsv 2>&1)
+                    
+                    if [[ "$TEST_MODE" == true ]]; then
+                        if echo "$REPO_CHECK" | grep -q "TEST-SUSE-Manager"; then
+                            echo "✓|$vm|Test repository configured"
+                        else
+                            echo "⚠|$vm|Test repository not found"
+                        fi
                     else
-                        echo "⚠|$vm|No SUSE Manager repository found - please verify manually"
+                        if echo "$REPO_CHECK" | grep -qi "suse.*manager\|rmt\|smt"; then
+                            echo "✓|$vm|SUSE Manager repository detected"
+                        else
+                            echo "⚠|$vm|No SUSE Manager repository found - please verify manually"
+                        fi
                     fi
                 fi
             fi
@@ -716,11 +821,21 @@ log_info "Total VMs Found: $TOTAL_VMS"
 log_info "Successful: $SUCCESSFUL"
 log_info "Skipped (already BYOS): $SKIPPED"
 log_info "Failed: $FAILED"
-log_info "SUSE Manager: $SUSE_MANAGER_URL"
+if [[ "$SKIP_REGISTRATION" == true ]]; then
+    log_info "SUSE Manager: N/A (skip-registration mode)"
+else
+    log_info "SUSE Manager: $SUSE_MANAGER_URL"
+fi
 log_info "=========================================="
 echo ""
 log_info "Log file: $LOG_FILE"
 log_warn "Next steps:"
 echo "  1. Review the log file for any errors"
-echo "  2. Test application functionality on converted VMs"
+if [[ "$SKIP_REGISTRATION" == true ]]; then
+    echo "  2. Run your SUSE Manager registration (Ansible playbook, etc.)"
+    echo "  3. Verify SUSE Manager repos are configured on VMs"
+    echo "  4. Test application functionality on converted VMs"
+else
+    echo "  2. Test application functionality on converted VMs"
+fi
 log_to_file "Batch conversion completed - $SUCCESSFUL successful, $SKIPPED skipped, $FAILED failed"
